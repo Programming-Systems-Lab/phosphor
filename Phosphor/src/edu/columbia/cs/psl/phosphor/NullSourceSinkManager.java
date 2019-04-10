@@ -3,6 +3,11 @@ package edu.columbia.cs.psl.phosphor;
 public class NullSourceSinkManager extends SourceSinkManager{
 
 	@Override
+	public boolean isSourceOrSinkOrTaintThrough(Class<?> clazz) {
+		return false;
+	}
+
+	@Override
 	public boolean isSource(String str) {
 		return false;
 	}
@@ -22,4 +27,8 @@ public class NullSourceSinkManager extends SourceSinkManager{
 		return false;
 	}
 
+	@Override
+	public String getBaseSink(String str) {
+		return null;
+	}
 }

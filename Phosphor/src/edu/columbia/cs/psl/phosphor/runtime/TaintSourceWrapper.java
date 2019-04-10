@@ -2,6 +2,8 @@ package edu.columbia.cs.psl.phosphor.runtime;
 
 import edu.columbia.cs.psl.phosphor.struct.*;
 
+import java.lang.reflect.Array;
+
 /**
  * This class handles dynamically doing source-based tainting.
  * 
@@ -23,156 +25,111 @@ import edu.columbia.cs.psl.phosphor.struct.*;
  */
 public class TaintSourceWrapper<T extends AutoTaintLabel> {
 
-	public void taintViolation(Taint<T> tag, Object obj, String sink) {
-		throw new TaintSinkError(tag, obj);
+	public void combineTaintsOnArray(Object inputArray, Taint<T> tag){
+		if(tag == null) {
+			return;
+		}
+		if(inputArray instanceof LazyArrayObjTags)
+		{
+			LazyArrayObjTags array = ((LazyArrayObjTags) inputArray);
+			if(array.taints == null)
+				array.taints = new Taint[array.getLength()];
+			for(int i=0; i < array.getLength();i++)
+			{
+				if(array.taints[i] == null)
+					array.taints[i] = tag.copy();
+				else
+					array.taints[i].addDependency(tag);
+			}
+
+		}else if (inputArray instanceof Object[])
+		{
+			//Object[]
+			for(int i = 0; i < ((Object[]) inputArray).length; i++){
+				Object o = ((Object[])inputArray)[i];
+				if(o instanceof TaintedWithObjTag)
+				{
+
+					Taint existing = (Taint) ((TaintedWithObjTag) o).getPHOSPHOR_TAG();
+					if(existing != null)
+						existing.addDependency(tag);
+					else
+						((TaintedWithObjTag) o).setPHOSPHOR_TAG(tag.copy());
+				}
+			}
+		}
 	}
 
-	public Taint<? extends AutoTaintLabel> generateTaint(String source) {
+	public Taint<AutoTaintLabel> generateTaint(String source) {
 		StackTraceElement[] st = Thread.currentThread().getStackTrace();
 		StackTraceElement[] s = new StackTraceElement[st.length - 3];
 		System.arraycopy(st, 3, s, 0, s.length);
-		return new Taint<AutoTaintLabel>(new AutoTaintLabel(source, s));
+		return new Taint<>(new AutoTaintLabel(source, s));
 	}
 
+	/* Called by sources for the arguments and return value. Adds a new taint tag to the specified object. */
 	public Object autoTaint(Object obj, String source, int argIdx) {
-		if (obj instanceof TaintedWithObjTag)
-			((TaintedWithObjTag) obj).setPHOSPHOR_TAG(generateTaint(source));
-		else if(obj instanceof TaintedPrimitiveWithObjTag)
-			((TaintedPrimitiveWithObjTag)obj).taint = generateTaint(source);
+		return autoTaint(obj, source, argIdx, generateTaint(source));
+	}
+
+	/* Called by sources for the arguments and return value. Adds the specified tag to the specified object. */
+	public Object autoTaint(Object obj, String source, int argIdx, Taint<? extends AutoTaintLabel> tag) {
+	    if(obj == null) {
+	        return null;
+        } else if(obj instanceof LazyArrayObjTags) {
+			return autoTaint((LazyArrayObjTags) obj, source, argIdx, tag);
+		} else if(obj instanceof TaintedWithObjTag) {
+			return autoTaint((TaintedWithObjTag) obj, source, argIdx, tag);
+		} else if(obj instanceof TaintedPrimitiveWithObjTag) {
+			return autoTaint((TaintedPrimitiveWithObjTag) obj, source, argIdx, tag);
+		} else if(obj.getClass().isArray()) {
+			for(int i = 0; i < Array.getLength(obj); i++) {
+				Array.set(obj, i, autoTaint(Array.get(obj, i), source, argIdx, tag));
+			}
+			return obj;
+		}
 		return obj;
 	}
 
-	@SuppressWarnings("unchecked")
-	public TaintedIntWithObjTag autoTaint(TaintedIntWithObjTag ret, String source, int argIdx) {
-		if (ret.taint != null)
-			ret.taint.addDependency(generateTaint(source));
-		else
-			ret.taint = generateTaint(source);
-		return ret;
-	}
+    @SuppressWarnings("unchecked")
+	public TaintedWithObjTag autoTaint(TaintedWithObjTag ret, String source, int argIdx, Taint<? extends AutoTaintLabel> tag) {
+        Taint prevTag = (Taint)ret.getPHOSPHOR_TAG();
+        if(prevTag != null) {
+            prevTag.addDependency(tag);
+        } else {
+            ret.setPHOSPHOR_TAG(tag);
+        }
+        return ret;
+    }
 
 	@SuppressWarnings("unchecked")
-	public TaintedShortWithObjTag autoTaint(TaintedShortWithObjTag ret, String source, int argIdx) {
-		if (ret.taint != null)
-			ret.taint.addDependency(generateTaint(source));
-		else
-			ret.taint = generateTaint(source);
-		return ret;
-	}
-
-	@SuppressWarnings("unchecked")
-	public TaintedLongWithObjTag autoTaint(TaintedLongWithObjTag ret, String source, int argIdx) {
-		if (ret.taint != null)
-			ret.taint.addDependency(generateTaint(source));
-		else
-			ret.taint = generateTaint(source);
-		return ret;
-	}
-
-	@SuppressWarnings("unchecked")
-	public TaintedFloatWithObjTag autoTaint(TaintedFloatWithObjTag ret, String source, int argIdx) {
-		if (ret.taint != null)
-			ret.taint.addDependency(generateTaint(source));
-		else
-			ret.taint = generateTaint(source);
-		return ret;
-	}
-
-	@SuppressWarnings("unchecked")
-	public TaintedDoubleWithObjTag autoTaint(TaintedDoubleWithObjTag ret, String source, int argIdx) {
-		if (ret.taint != null)
-			ret.taint.addDependency(generateTaint(source));
-		else
-			ret.taint = generateTaint(source);
-		return ret;
-	}
-
-	@SuppressWarnings("unchecked")
-	public TaintedBooleanWithObjTag autoTaint(TaintedBooleanWithObjTag ret, String source, int argIdx) {
-		if (ret.taint != null)
-			ret.taint.addDependency(generateTaint(source));
-		else
-			ret.taint = generateTaint(source);
-		return ret;
-	}
-
-	@SuppressWarnings("unchecked")
-	public TaintedByteWithObjTag autoTaint(TaintedByteWithObjTag ret, String source, int argIdx) {
-		if (ret.taint != null)
-			ret.taint.addDependency(generateTaint(source));
-		else
-			ret.taint = generateTaint(source);
-		return ret;
-	}
-
-	@SuppressWarnings("unchecked")
-	public TaintedCharWithObjTag autoTaint(TaintedCharWithObjTag ret, String source, int argIdx) {
-		if (ret.taint != null)
-			ret.taint.addDependency(generateTaint(source));
-		else
-			ret.taint = generateTaint(source);
-		return ret;
-	}
-
-	@SuppressWarnings({ "unchecked", "rawtypes" })
-	private void setTaints(LazyArrayObjTags ret, String source) {
-		Taint retTaint = generateTaint(source);
+	public LazyArrayObjTags autoTaint(LazyArrayObjTags ret, String source, int argIdx, Taint<? extends AutoTaintLabel> tag) {
 		Taint[] taintArray = ret.taints;
 		if (taintArray != null) {
 			for (int i = 0; i < taintArray.length; i++) {
 				if(taintArray[i] == null)
-					taintArray[i] = retTaint.copy();
+					taintArray[i] = tag.copy();
 				else
-					taintArray[i].addDependency(retTaint);
+					taintArray[i].addDependency(tag);
 			}
 		} else {
-			ret.setTaints(retTaint);
+			ret.setTaints(tag);
 		}
-	}
-
-	public LazyByteArrayObjTags autoTaint(LazyByteArrayObjTags ret, String source, int argIdx) {
-		setTaints(ret, source);
 		return ret;
 	}
 
-	public LazyBooleanArrayObjTags autoTaint(LazyBooleanArrayObjTags ret, String source, int argIdx) {
-		setTaints(ret, source);
+	@SuppressWarnings("unchecked")
+	public TaintedPrimitiveWithObjTag autoTaint(TaintedPrimitiveWithObjTag ret, String source, int argIdx, Taint<? extends AutoTaintLabel> tag) {
+		if (ret.taint != null)
+			ret.taint.addDependency(tag);
+		else
+			ret.taint = tag;
 		return ret;
 	}
 
-	public LazyCharArrayObjTags autoTaint(LazyCharArrayObjTags ret, String source, int argIdx) {
-		setTaints(ret, source);
-		return ret;
-	}
-
-	public LazyDoubleArrayObjTags autoTaint(LazyDoubleArrayObjTags ret, String source, int argIdx) {
-		setTaints(ret, source);
-		return ret;
-	}
-
-	public LazyFloatArrayObjTags autoTaint(LazyFloatArrayObjTags ret, String source, int argIdx) {
-		setTaints(ret, source);
-		return ret;
-	}
-
-	public LazyIntArrayObjTags autoTaint(LazyIntArrayObjTags ret, String source, int argIdx) {
-		setTaints(ret, source);
-		return ret;
-	}
-
-	public LazyShortArrayObjTags autoTaint(LazyShortArrayObjTags ret, String source, int argIdx) {
-		setTaints(ret, source);
-		return ret;
-	}
-
-	public LazyLongArrayObjTags autoTaint(LazyLongArrayObjTags ret, String source, int argIdx) {
-		setTaints(ret, source);
-		return ret;
-	}
-
-	public void checkTaint(int tag, String sink) {
+	public void checkTaint(int tag, Object obj, String baseSink, String actualSink) {
 		if (tag != 0)
-			throw new IllegalAccessError("Argument carries taint " + tag + " at " + sink);
+			throw new IllegalAccessError("Argument carries taint " + tag + " at " + actualSink);
 	}
 
 	public static void checkTaint(int tag) {
@@ -180,24 +137,29 @@ public class TaintSourceWrapper<T extends AutoTaintLabel> {
 			throw new IllegalAccessError("Argument carries taint " + tag);
 	}
 
-	public void checkTaint(Taint<T> tag, String sink) {
-		if (tag != null)
-			taintViolation(tag, null, sink);
+	public Taint[] getStringValueTaints(String str) {
+		if(str == null) {
+			return null;
+		} else {
+			return((String)str).valuePHOSPHOR_TAG.taints;
+
+		}
 	}
 
 	@SuppressWarnings("unchecked")
-	public void checkTaint(Object obj, String sink) {
+	public void checkTaint(Object obj, String baseSink, String actualSink) {
 		if (obj == null)
 			return;
 		if (obj instanceof String) {
 			if (obj instanceof TaintedWithObjTag) {
-				if (obj != null && ((String) obj).valuePHOSPHOR_TAG != null && ((String) obj).valuePHOSPHOR_TAG.taints != null) {
+				Taint[] taints = getStringValueTaints((String) obj);
+				if (taints != null) {
 					SimpleHashSet<String> reported = new SimpleHashSet<>();
-					for (Taint t : ((String) obj).valuePHOSPHOR_TAG.taints) {
+					for (Taint t : taints) {
 						if (t != null) {
 							String _t = new String(t.toString().getBytes());
 							if (reported.add(_t))
-								taintViolation(t, obj, sink);
+								taintViolation(t, obj, baseSink, actualSink);
 						}
 					}
 				}
@@ -207,7 +169,7 @@ public class TaintSourceWrapper<T extends AutoTaintLabel> {
 				throw new IllegalAccessError("Argument carries taint " + ((TaintedWithIntTag) obj).getPHOSPHOR_TAG());
 		} else if (obj instanceof TaintedWithObjTag) {
 			if (((TaintedWithObjTag) obj).getPHOSPHOR_TAG() != null)
-				taintViolation((Taint<T>) ((TaintedWithObjTag) obj).getPHOSPHOR_TAG(), obj, sink);
+				taintViolation((Taint<T>) ((TaintedWithObjTag) obj).getPHOSPHOR_TAG(), obj, baseSink, actualSink);
 		} else if (obj instanceof int[]) {
 			for (int i : ((int[]) obj)) {
 				if (i > 0)
@@ -225,22 +187,34 @@ public class TaintSourceWrapper<T extends AutoTaintLabel> {
 			if (tags.taints != null)
 				for (Object i : tags.taints) {
 					if (i != null)
-						taintViolation((Taint<T>) i, obj, sink);
+						taintViolation((Taint<T>) i, obj, baseSink, actualSink);
 				}
 		} else if (obj instanceof Object[]) {
 			for (Object o : ((Object[]) obj))
-				checkTaint(o, sink);
+				checkTaint(o, baseSink, actualSink);
 		} else if (obj instanceof ControlTaintTagStack) {
 			ControlTaintTagStack ctrl = (ControlTaintTagStack) obj;
 			if (ctrl.taint != null && !ctrl.isEmpty()) {
-				taintViolation((Taint<T>) ctrl.taint, obj, sink);
+				taintViolation((Taint<T>) ctrl.taint, obj, baseSink, actualSink);
 			}
 		} else if (obj instanceof Taint) {
-			taintViolation((Taint<T>) obj, null, sink);
+			taintViolation((Taint<T>) obj, null, baseSink, actualSink);
+		} else if (obj instanceof TaintedPrimitiveWithObjTag) {
+			if(((TaintedPrimitiveWithObjTag)obj).taint != null) {
+				taintViolation(((TaintedPrimitiveWithObjTag)obj).taint, ((TaintedPrimitiveWithObjTag)obj).getValue(), baseSink, actualSink);
+			}
+		} else if (obj instanceof TaintedPrimitiveWithIntTag) {
+			if(((TaintedPrimitiveWithIntTag)obj).taint != 0) {
+				throw new IllegalAccessError("Argument carries taint " + ((TaintedPrimitiveWithIntTag)obj).taint);
+			}
 		}
 	}
 
-	public boolean hasTaints(int[] tags) {
+    public void taintViolation(Taint<T> tag, Object obj, String baseSink, String actualSink) {
+        throw new TaintSinkError(tag, obj);
+    }
+
+    public boolean hasTaints(int[] tags) {
 		if (tags == null)
 			return false;
 		for (int i : tags) {
@@ -248,5 +222,15 @@ public class TaintSourceWrapper<T extends AutoTaintLabel> {
 				return true;
 		}
 		return false;
+	}
+
+	/* Called just before a sink method returns. */
+	public void exitingSink(String sink) {
+		return;
+	}
+
+	/* Called after a sink method makes its calls to checkTaint but before the rest of the method body executes. */
+	public void enteringSink(String sink) {
+		return;
 	}
 }

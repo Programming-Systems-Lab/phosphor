@@ -1,50 +1,25 @@
 package edu.columbia.cs.psl.phosphor.instrumenter;
 
+import edu.columbia.cs.psl.phosphor.Configuration;
+import edu.columbia.cs.psl.phosphor.TaintUtils;
+import edu.columbia.cs.psl.phosphor.instrumenter.analyzer.*;
+import edu.columbia.cs.psl.phosphor.runtime.CharacterUtils;
+import edu.columbia.cs.psl.phosphor.struct.multid.MultiDTaintedArray;
+import org.objectweb.asm.*;
+import org.objectweb.asm.commons.JSRInlinerAdapter;
+import org.objectweb.asm.tree.*;
+import org.objectweb.asm.tree.analysis.Analyzer;
+import org.objectweb.asm.tree.analysis.BasicValue;
+import org.objectweb.asm.tree.analysis.Frame;
+import org.objectweb.asm.tree.analysis.Value;
+import org.objectweb.asm.util.TraceClassVisitor;
+
 import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.PrintWriter;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedList;
-
-import edu.columbia.cs.psl.phosphor.runtime.CharacterUtils;
-import org.objectweb.asm.ClassReader;
-import org.objectweb.asm.ClassVisitor;
-import org.objectweb.asm.ClassWriter;
-import org.objectweb.asm.FieldVisitor;
-import org.objectweb.asm.Label;
-import org.objectweb.asm.MethodVisitor;
-import org.objectweb.asm.Opcodes;
-import org.objectweb.asm.Type;
-import org.objectweb.asm.commons.JSRInlinerAdapter;
-import org.objectweb.asm.tree.AbstractInsnNode;
-import org.objectweb.asm.tree.FieldInsnNode;
-import org.objectweb.asm.tree.FieldNode;
-import org.objectweb.asm.tree.FrameNode;
-import org.objectweb.asm.tree.IincInsnNode;
-import org.objectweb.asm.tree.InsnNode;
-import org.objectweb.asm.tree.InvokeDynamicInsnNode;
-import org.objectweb.asm.tree.LabelNode;
-import org.objectweb.asm.tree.LdcInsnNode;
-import org.objectweb.asm.tree.MethodInsnNode;
-import org.objectweb.asm.tree.MethodNode;
-import org.objectweb.asm.tree.MultiANewArrayInsnNode;
-import org.objectweb.asm.tree.TypeInsnNode;
-import org.objectweb.asm.tree.VarInsnNode;
-import org.objectweb.asm.tree.analysis.Analyzer;
-import org.objectweb.asm.tree.analysis.AnalyzerException;
-import org.objectweb.asm.tree.analysis.BasicValue;
-import org.objectweb.asm.tree.analysis.Frame;
-import org.objectweb.asm.tree.analysis.Value;
-
-import edu.columbia.cs.psl.phosphor.Configuration;
-import edu.columbia.cs.psl.phosphor.TaintUtils;
-import edu.columbia.cs.psl.phosphor.instrumenter.analyzer.InstMethodSinkInterpreter;
-import edu.columbia.cs.psl.phosphor.instrumenter.analyzer.NeverNullArgAnalyzerAdapter;
-import edu.columbia.cs.psl.phosphor.instrumenter.analyzer.PFrame;
-import edu.columbia.cs.psl.phosphor.instrumenter.analyzer.SinkableArrayValue;
-import edu.columbia.cs.psl.phosphor.instrumenter.analyzer.TaggedValue;
-import edu.columbia.cs.psl.phosphor.struct.multid.MultiDTaintedArray;
-import org.objectweb.asm.util.TraceClassVisitor;
 
 public class TaintLoadCoercer extends MethodVisitor implements Opcodes {
 	PrimitiveArrayAnalyzer primitiveArrayFixer;
@@ -53,10 +28,14 @@ public class TaintLoadCoercer extends MethodVisitor implements Opcodes {
 		this.primitiveArrayFixer = primitiveArrayFixer;
 	}
 	private boolean ignoreExistingFrames;
-	public TaintLoadCoercer(final String className, int access, final String name, final String desc, String signature, String[] exceptions, final MethodVisitor cmv, boolean ignoreExistingFrames) {
+	private InstOrUninstChoosingMV instOrUninstChoosingMV;
+	private boolean aggressivelyReduceMethodSize;
+	public TaintLoadCoercer(final String className, int access, final String name, final String desc, String signature, String[] exceptions, final MethodVisitor cmv, boolean ignoreExistingFrames, final InstOrUninstChoosingMV instOrUninstChoosingMV, boolean aggressivelyReduceMethodSize) {
 		super(Opcodes.ASM5);
 		this.mv = new UninstTaintLoadCoercerMN(className, access, name, desc, signature, exceptions, cmv);
 		this.ignoreExistingFrames = ignoreExistingFrames;
+		this.instOrUninstChoosingMV = instOrUninstChoosingMV;
+		this.aggressivelyReduceMethodSize = aggressivelyReduceMethodSize;
 	}
 
 	@Override
@@ -450,47 +429,58 @@ public class TaintLoadCoercer extends MethodVisitor implements Opcodes {
 					}
 					insn = insn.getNext();
 				}
-				if(this.instructions.size() > 20000 && canIgnoreTaintsTillEnd)
-				{
+				if(this.instructions.size() > 20000) {
+					if (canIgnoreTaintsTillEnd) {
 //					System.out.println("Can opt " + className + name + " "+canIgnoreTaintsTillEnd);
-					insn = this.instructions.getFirst();
-					this.instructions.insert(new InsnNode(TaintUtils.IGNORE_EVERYTHING));
-					while(insn != null)
-					{
-						if(insn.getOpcode() == PUTSTATIC)
-						{
-							Type origType = Type.getType(((FieldInsnNode)insn).desc);
-							if(origType.getSort() == Type.ARRAY && (origType.getElementType().getSort() != Type.OBJECT || origType.getElementType().getInternalName().equals("java/lang/Object")))
-							{
-								if(origType.getElementType().getSort() != Type.OBJECT)
-								{
-									Type wrappedType = MultiDTaintedArray.getTypeForType(origType);
-									if(origType.getDimensions() == 1)
-									{
-										this.instructions.insertBefore(insn, new InsnNode(DUP));
+						insn = this.instructions.getFirst();
+						this.instructions.insert(new InsnNode(TaintUtils.IGNORE_EVERYTHING));
+						while (insn != null) {
+							if (insn.getOpcode() == PUTSTATIC) {
+								Type origType = Type.getType(((FieldInsnNode) insn).desc);
+								if (origType.getSort() == Type.ARRAY && (origType.getElementType().getSort() != Type.OBJECT || origType.getElementType().getInternalName().equals("java/lang/Object"))) {
+									if (origType.getElementType().getSort() != Type.OBJECT) {
+										Type wrappedType = MultiDTaintedArray.getTypeForType(origType);
+										if (origType.getDimensions() == 1) {
+											this.instructions.insertBefore(insn, new InsnNode(DUP));
+											this.instructions.insertBefore(insn, new MethodInsnNode(Opcodes.INVOKESTATIC, Type.getInternalName(MultiDTaintedArray.class), "boxIfNecessary", "(Ljava/lang/Object;)Ljava/lang/Object;", false));
+											this.instructions.insertBefore(insn, new TypeInsnNode(CHECKCAST, wrappedType.getInternalName()));
+											this.instructions.insertBefore(insn, new FieldInsnNode(PUTSTATIC, ((FieldInsnNode) insn).owner, ((FieldInsnNode) insn).name + TaintUtils.TAINT_FIELD, wrappedType.getDescriptor()));
+										} else {
+											((FieldInsnNode) insn).desc = wrappedType.getDescriptor();
+											this.instructions.insertBefore(insn, new MethodInsnNode(Opcodes.INVOKESTATIC, Type.getInternalName(MultiDTaintedArray.class), "boxIfNecessary", "(Ljava/lang/Object;)Ljava/lang/Object;", false));
+											this.instructions.insertBefore(insn, new TypeInsnNode(CHECKCAST, wrappedType.getInternalName()));
+										}
+									} else {
 										this.instructions.insertBefore(insn, new MethodInsnNode(Opcodes.INVOKESTATIC, Type.getInternalName(MultiDTaintedArray.class), "boxIfNecessary", "(Ljava/lang/Object;)Ljava/lang/Object;", false));
-										this.instructions.insertBefore(insn, new TypeInsnNode(CHECKCAST, wrappedType.getInternalName()));
-										this.instructions.insertBefore(insn, new FieldInsnNode(PUTSTATIC, ((FieldInsnNode)insn).owner, ((FieldInsnNode)insn).name+TaintUtils.TAINT_FIELD, wrappedType.getDescriptor()));
-									}
-									else
-									{
-										((FieldInsnNode)insn).desc= wrappedType.getDescriptor();
-										this.instructions.insertBefore(insn, new MethodInsnNode(Opcodes.INVOKESTATIC, Type.getInternalName(MultiDTaintedArray.class), "boxIfNecessary", "(Ljava/lang/Object;)Ljava/lang/Object;", false));
-										this.instructions.insertBefore(insn, new TypeInsnNode(CHECKCAST, wrappedType.getInternalName()));
+										this.instructions.insertBefore(insn, new TypeInsnNode(CHECKCAST, origType.getInternalName()));
 									}
 								}
-								else
-								{
+							} else if (insn.getOpcode() == ARETURN) {
+								Type origType = Type.getReturnType(this.desc);
+								if (origType.getSort() == Type.ARRAY && (origType.getElementType().getSort() != Type.OBJECT || origType.getElementType().getInternalName().equals("java/lang/Object"))) {
+									Type wrappedType = MultiDTaintedArray.getTypeForType(origType);
 									this.instructions.insertBefore(insn, new MethodInsnNode(Opcodes.INVOKESTATIC, Type.getInternalName(MultiDTaintedArray.class), "boxIfNecessary", "(Ljava/lang/Object;)Ljava/lang/Object;", false));
-									this.instructions.insertBefore(insn, new TypeInsnNode(CHECKCAST, origType.getInternalName()));
+									this.instructions.insertBefore(insn, new TypeInsnNode(CHECKCAST, wrappedType.getInternalName()));
 								}
 							}
+							insn = insn.getNext();
 						}
-						insn = insn.getNext();
+						super.visitEnd();
+						this.accept(cmv);
+						return;
 					}
-					super.visitEnd();
-					this.accept(cmv);
-					return;
+					else if(aggressivelyReduceMethodSize) //only do this if it's REALLY bad
+					{
+						//Not able to use these cheap tricks. Let's bail.
+						insn = this.instructions.getFirst();
+						this.instructions.insert(new InsnNode(TaintUtils.IGNORE_EVERYTHING));
+						this.instructions.insert(new VarInsnNode(TaintUtils.IGNORE_EVERYTHING,0));
+						instOrUninstChoosingMV.disableTainting();
+						super.visitEnd();
+						this.accept(cmv);
+						return;
+					}
+
 				}
 
 				HashSet<SinkableArrayValue> swapPop = new HashSet<>();
@@ -498,19 +488,6 @@ public class TaintLoadCoercer extends MethodVisitor implements Opcodes {
 				insn = this.instructions.getFirst();
 				for (int i = 0; i < frames.length; i++) {
 					// // System.out.print(i + " " );
-					String fr = "";
-					if (frames[i] != null)
-						for (int j = 0; j < frames[i].getStackSize(); j++)
-							fr += (frames[i].getStack(j)) + " ";
-					String fr2 = "";
-					if (frames[i] != null)
-						for (int j = 0; j < frames[i].getLocals(); j++)
-						{
-							fr2 += (frames[i].getLocal(j)) + " ";
-						}
-//					  System.out.println(fr);
-//					this.instructions.insertBefore(insn, new LdcInsnNode(fr));
-//					this.instructions.insertBefore(insn, new InsnNode(Opcodes.POP));
 //					this.instructions.insertBefore(insn, new LdcInsnNode(fr2));
 					if (insn.getType() == AbstractInsnNode.FRAME && frames[i] != null) {
 						FrameNode fn = (FrameNode) insn;
@@ -568,6 +545,42 @@ public class TaintLoadCoercer extends MethodVisitor implements Opcodes {
 //				{
 //					System.out.println(System.identityHashCode(v));
 //				}
+				//Before we start mucking around with the instruction list, find the analyzed frame that exists at each relevant value source
+				HashMap<SinkableArrayValue,Frame> framesAtValues = new HashMap<>();
+				for(SinkableArrayValue v : relevantValues)
+				{
+					if (v.getSrc() != null && framesAtValues.get(v) == null) {
+						if (this.instructions.contains(v.getSrc())) {
+							int k = this.instructions.indexOf(v.getSrc());
+							if (k < frames.length && frames[k] != null) {
+								framesAtValues.put(v, frames[k]);
+							}
+						}
+					}
+
+				}
+
+				//for debug
+//				insn = this.instructions.getFirst();
+//				for(int i = 0; i< frames.length; i++)
+//				{
+//					String fr = "";
+//					if (frames[i] != null)
+//						for (int j = 0; j < frames[i].getStackSize(); j++)
+//							fr += (frames[i].getStack(j)) + " ";
+//					String fr2 = "";
+//					if (frames[i] != null)
+//						for (int j = 0; j < frames[i].getLocals(); j++)
+//						{
+//							fr2 += (frames[i].getLocal(j)) + " ";
+//						}
+////					  System.out.println(fr);
+//					this.instructions.insertBefore(insn, new LdcInsnNode(fr));
+//					this.instructions.insertBefore(insn, new InsnNode(Opcodes.POP));
+//					insn = insn.getNext();
+//				}
+
+
 				for (SinkableArrayValue v : relevantValues) {
 					if (!added.add(v.getSrc()))
 						continue;
@@ -579,10 +592,20 @@ public class TaintLoadCoercer extends MethodVisitor implements Opcodes {
 //												System.out.println(Printer.OPCODES[v.src.getOpcode()] + ", " + v.flowsToInstMethodCall+","+(v.srcVal != null ? v.srcVal.flowsToInstMethodCall : "."));
 					if (this.instructions.contains(v.getSrc())) {
 						if (v.masterDup != null || !v.otherDups.isEmpty()) {
+							if(framesAtValues.containsKey(v))
+							{
+								Frame f = framesAtValues.get(v);
+								Object r = f.getStack(f.getStackSize()-1);
+								if(!(r instanceof SinkableArrayValue))
+								{
+									continue;
+								}
+							}
 							SinkableArrayValue masterDup = v;
-							if(v.masterDup != null)
+							if (v.masterDup != null)
 								masterDup = v.masterDup;
 							int i = 0;
+
 							if(relevantValues.contains(masterDup)) //bottom one is relevant
 								this.instructions.insertBefore(v.getSrc(), new InsnNode(TaintUtils.DUP_TAINT_AT_0+i));
 							i++;
@@ -612,12 +635,24 @@ public class TaintLoadCoercer extends MethodVisitor implements Opcodes {
 					this.instructions.insert(v.getSrc(), new InsnNode(TaintUtils.IGNORE_EVERYTHING));
 				}
 
-			} catch (AnalyzerException e) {
+			} catch (Throwable e) {
 				// TODO Auto-generated catch block
 				e.printStackTrace();
+				PrintWriter pw = null;
+				try {
+					pw = new PrintWriter("lastMethod.txt");
+					TraceClassVisitor tcv = new TraceClassVisitor(null, new PhosphorTextifier(), pw);
+					this.accept(tcv);
+					tcv.visitEnd();
+					pw.flush();
+				} catch (FileNotFoundException e1) {
+					e1.printStackTrace();
+				}
+
 				throw new IllegalStateException(e);
 			}
 			super.visitEnd();
+
 
 			this.accept(cmv);
 		}
@@ -685,7 +720,7 @@ public class TaintLoadCoercer extends MethodVisitor implements Opcodes {
 				};
 //				mv = new SpecialOpcodeRemovingMV(mv,false,className,false);
 //				NeverNullArgAnalyzerAdapter analyzer = new NeverNullArgAnalyzerAdapter(className, access, className, desc, mv);
-				mv = new TaintLoadCoercer(className, access, name, desc, signature, exceptions, mv, true);
+				mv = new TaintLoadCoercer(className, access, name, desc, signature, exceptions, mv, true, null, false);
 //				LocalVariableManager lvs = new LocalVariableManager(access, desc, mv, analyzer, mv, false);
 //				mv = lvs;
 				PrimitiveArrayAnalyzer paa = new PrimitiveArrayAnalyzer(className,access,name,desc,signature,exceptions,mv);

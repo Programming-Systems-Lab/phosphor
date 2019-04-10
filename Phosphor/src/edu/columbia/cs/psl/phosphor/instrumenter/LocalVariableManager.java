@@ -1,14 +1,14 @@
 package edu.columbia.cs.psl.phosphor.instrumenter;
 
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Map.Entry;
-
+import edu.columbia.cs.psl.phosphor.Configuration;
+import edu.columbia.cs.psl.phosphor.TaintUtils;
+import edu.columbia.cs.psl.phosphor.instrumenter.analyzer.NeverNullArgAnalyzerAdapter;
+import edu.columbia.cs.psl.phosphor.instrumenter.analyzer.TaggedValue;
+import edu.columbia.cs.psl.phosphor.org.objectweb.asm.commons.OurLocalVariablesSorter;
 import edu.columbia.cs.psl.phosphor.runtime.TaintSentinel;
+import edu.columbia.cs.psl.phosphor.struct.ControlTaintTagStack;
 import edu.columbia.cs.psl.phosphor.struct.EnqueuedTaint;
 import edu.columbia.cs.psl.phosphor.struct.ExceptionalTaintData;
-import edu.columbia.cs.psl.phosphor.struct.MaybeThrownException;
 import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
@@ -16,12 +16,10 @@ import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.LocalVariableNode;
 
-import edu.columbia.cs.psl.phosphor.Configuration;
-import edu.columbia.cs.psl.phosphor.TaintUtils;
-import edu.columbia.cs.psl.phosphor.instrumenter.analyzer.NeverNullArgAnalyzerAdapter;
-import edu.columbia.cs.psl.phosphor.instrumenter.analyzer.TaggedValue;
-import edu.columbia.cs.psl.phosphor.org.objectweb.asm.commons.OurLocalVariablesSorter;
-import edu.columbia.cs.psl.phosphor.struct.ControlTaintTagStack;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map.Entry;
 
 public class LocalVariableManager extends OurLocalVariablesSorter implements Opcodes {
 	private NeverNullArgAnalyzerAdapter analyzer;
@@ -42,6 +40,8 @@ public class LocalVariableManager extends OurLocalVariablesSorter implements Opc
 			isIgnoreEverything = !isIgnoreEverything;
 		super.visitInsn(opcode);
 	}
+
+	private boolean isInMethodThatsTooBig;
 	@Override
 	public void visitVarInsn(int opcode, int var) {
 		if(opcode == TaintUtils.BRANCH_END || opcode == TaintUtils.BRANCH_START || isIgnoreEverything)
@@ -49,7 +49,10 @@ public class LocalVariableManager extends OurLocalVariablesSorter implements Opc
 			mv.visitVarInsn(opcode, var);
 			return;
 		}
-		super.visitVarInsn(opcode, var);
+		if (opcode == TaintUtils.IGNORE_EVERYTHING)
+			isInMethodThatsTooBig = true;
+		else
+			super.visitVarInsn(opcode, var);
 	}
 	public HashMap<Integer, Integer> varToShadowVar = new HashMap<Integer, Integer>();
 	private boolean generateExtraDebug;
@@ -115,16 +118,8 @@ public class LocalVariableManager extends OurLocalVariablesSorter implements Opc
 
 	@Deprecated
 	public int newLocal(Type type) {
-		int idx = super.newLocal(type);
-		Label lbl = new Label();
-		super.visitLabel(lbl);
+		throw new UnsupportedOperationException();
 
-		LocalVariableNode newLVN = new LocalVariableNode("phosphorShadowLV" + createdLVIdx, type.getDescriptor(), null, new LabelNode(lbl), new LabelNode(end), idx);
-		createdLVs.add(newLVN);
-		curLocalIdxToLVNode.put(idx, newLVN);
-		createdLVIdx++;
-
-		return idx;
 	}
 
 	HashMap<Integer, Integer> origLVMap = new HashMap<Integer, Integer>();
@@ -267,20 +262,6 @@ public class LocalVariableManager extends OurLocalVariablesSorter implements Opc
 		return idx;
 	}
 
-	@Override
-	public void remapLocal(int local, Type type) {
-		Label lbl = new Label();
-		super.visitLabel(lbl);
-		curLocalIdxToLVNode.get(local).end = new LabelNode(lbl);
-		super.remapLocal(local, type);
-
-		LocalVariableNode newLVN = new LocalVariableNode("phosphorShadowLV" + createdLVIdx, type.getDescriptor(), null, new LabelNode(lbl), new LabelNode(end), local);
-		createdLVs.add(newLVN);
-		curLocalIdxToLVNode.put(local, newLVN);
-
-		createdLVIdx++;
-	}
-
 	/**
 	 * Gets a tmp lv capable of storing the top stack el
 	 * 
@@ -317,6 +298,16 @@ public class LocalVariableManager extends OurLocalVariablesSorter implements Opc
 		for (TmpLV lv : tmpLVs) {
 			if (!lv.inUse && lv.type.getSize() == t.getSize()) {
 				if (!lv.type.equals(t)) {
+					//End the old LV node, make a new one
+
+					Label lbl = new Label();
+					super.visitLabel(lbl);
+
+					LocalVariableNode newLVN = new LocalVariableNode("phosphorTempStack" + createdLVIdx, t.getDescriptor(), null, new LabelNode(lbl), new LabelNode(end), lv.idx);
+					createdLVs.add(newLVN);
+					curLocalIdxToLVNode.put(lv.idx, newLVN);
+					createdLVIdx++;
+
 					remapLocal(lv.idx, t);
 					if (analyzer.locals != null && lv.idx < analyzer.locals.size()) {
 						analyzer.locals.set(lv.idx, TaintUtils.getStackTypeForType(t));
@@ -331,8 +322,18 @@ public class LocalVariableManager extends OurLocalVariablesSorter implements Opc
 				return lv.idx;
 			}
 		}
+
+		int idx = super.newLocal(t);
+		Label lbl = new Label();
+		super.visitLabel(lbl);
+
+		LocalVariableNode newLVN = new LocalVariableNode("phosphorTempStack" + createdLVIdx, t.getDescriptor(), null, new LabelNode(lbl), new LabelNode(end), idx);
+		createdLVs.add(newLVN);
+		curLocalIdxToLVNode.put(idx, newLVN);
+		createdLVIdx++;
+
 		TmpLV newLV = new TmpLV();
-		newLV.idx = newLocal(t);
+		newLV.idx = idx;
 		newLV.type = t;
 		newLV.inUse = true;
 		tmpLVs.add(newLV);
@@ -356,9 +357,10 @@ public class LocalVariableManager extends OurLocalVariablesSorter implements Opc
 				super.visitLabel(this.end);
 				endVisited = true;
 			}
-			for (LocalVariableNode n : createdLVs) {
-				uninstMV.visitLocalVariable(n.name, n.desc, n.signature, n.start.getLabel(), n.end.getLabel(), n.index);
-			}
+			if(!Configuration.SKIP_LOCAL_VARIABLE_TABLE)
+				for (LocalVariableNode n : createdLVs) {
+					uninstMV.visitLocalVariable(n.name, n.desc, n.signature, n.start.getLabel(), n.end.getLabel(), n.index);
+				}
 			createdLVs.clear();
 		}
 	}
@@ -372,7 +374,7 @@ public class LocalVariableManager extends OurLocalVariablesSorter implements Opc
 			super.visitLabel(end);
 			endVisited = true;
 		}
-		if(generateExtraDebug)
+		if(generateExtraDebug && !Configuration.SKIP_LOCAL_VARIABLE_TABLE)
 		{
 			int n = 0;
 			if(!isStatic)
@@ -464,7 +466,7 @@ public class LocalVariableManager extends OurLocalVariablesSorter implements Opc
             throw new IllegalStateException(
                     "ClassReader.accept() should be called with EXPAND_FRAMES flag");
         }
-        if (!changed && !isFirstFrame) { // optimization for the case where mapping = identity
+        if (isInMethodThatsTooBig || (!changed && !isFirstFrame)) { // optimization for the case where mapping = identity
             mv.visitFrame(type, nLocal, local, nStack, stack);
             return;
         }
@@ -581,7 +583,7 @@ public class LocalVariableManager extends OurLocalVariablesSorter implements Opc
 
             		int newVar = remap(index, typ);
             		int shadowVar = 0;
-					if (newVar > lastArg) {
+					if (newVar > lastArg || (newVar < lastArg && oldArgTypes.get(newVar).getDescriptor().equals("Ltop;"))) {
 						if (!varToShadowVar.containsKey(newVar))
 							shadowVar = newShadowLV(typ, newVar);
 						else

@@ -7,7 +7,6 @@ import java.io.FileOutputStream;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.io.PrintWriter;
-import java.lang.instrument.ClassFileTransformer;
 import java.lang.instrument.IllegalClassFormatException;
 import java.lang.instrument.Instrumentation;
 import java.lang.reflect.Constructor;
@@ -16,23 +15,17 @@ import java.security.MessageDigest;
 import java.security.ProtectionDomain;
 import java.util.List;
 
-import org.objectweb.asm.ClassReader;
-import org.objectweb.asm.ClassVisitor;
-import org.objectweb.asm.ClassWriter;
-import org.objectweb.asm.MethodVisitor;
-import org.objectweb.asm.Opcodes;
-import org.objectweb.asm.Type;
-import org.objectweb.asm.commons.JSRInlinerAdapter;
+import edu.columbia.cs.psl.phosphor.instrumenter.ClinitRetransformClassVisitor;
+import edu.columbia.cs.psl.phosphor.instrumenter.EclipseCompilerCV;
+import edu.columbia.cs.psl.phosphor.instrumenter.HidePhosphorFromASMCV;
+import edu.columbia.cs.psl.phosphor.org.objectweb.asm.commons.OurJSRInlinerAdapter;
+import edu.columbia.cs.psl.phosphor.org.objectweb.asm.commons.OurSerialVersionUIDAdder;
+import org.objectweb.asm.*;
 import org.objectweb.asm.commons.SerialVersionUIDAdder;
-import org.objectweb.asm.tree.AnnotationNode;
-import org.objectweb.asm.tree.ClassNode;
-import org.objectweb.asm.tree.FieldNode;
-import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.*;
 
 import edu.columbia.cs.psl.phosphor.instrumenter.TaintTrackingClassVisitor;
 import edu.columbia.cs.psl.phosphor.instrumenter.asm.OffsetPreservingClassReader;
-import edu.columbia.cs.psl.phosphor.runtime.AbstractTaintCheckerSetter;
-import edu.columbia.cs.psl.phosphor.runtime.TaintChecker;
 import edu.columbia.cs.psl.phosphor.runtime.TaintInstrumented;
 import edu.columbia.cs.psl.phosphor.runtime.TaintSourceWrapper;
 import edu.columbia.cs.psl.phosphor.struct.ControlTaintTagStack;
@@ -48,6 +41,7 @@ public class PreMain {
 
 	public static boolean DEBUG = System.getProperty("phosphor.debug") != null;
 	public static boolean RUNTIME_INST = false;
+	public static boolean INSTRUMENTATION_EXCEPTION_OCURRED = false;
 
 	public static ClassLoader bigLoader = PreMain.class.getClassLoader();
 	/**
@@ -55,7 +49,10 @@ public class PreMain {
 	 */
 	public static ClassLoader curLoader;
 
-	public static final class PCLoggingTransformer implements ClassFileTransformer {
+	public static final class PCLoggingTransformer extends PhosphorBaseTransformer {
+		public PCLoggingTransformer(){
+			TaintUtils.VERIFY_CLASS_GENERATION = System.getProperty("phosphor.verify") != null;
+		}
 		private static final class HackyClassWriter extends ClassWriter {
 
 			private HackyClassWriter(ClassReader classReader, int flags) {
@@ -108,63 +105,8 @@ public class PreMain {
 		}
 
 		static boolean innerException = false;
-		static boolean INITED = false;
 
-		public LazyByteArrayObjTags transform$$PHOSPHORTAGGED(ClassLoader loader, String className, Class<?> classBeingRedefined, ProtectionDomain protectionDomain, LazyByteArrayObjTags classtaint,
-				byte[] classfileBuffer) throws IllegalClassFormatException {
-
-			if (!INITED) {
-				Configuration.IMPLICIT_TRACKING = false;
-				Configuration.MULTI_TAINTING = true;
-				Configuration.init();
-				INITED = true;
-			}
-			LazyByteArrayObjTags ret = null;
-			if (className != null && className.startsWith("sun")) //there are dynamically generated accessors for reflection, we don't want to instrument those.
-				ret = new LazyByteArrayObjTags(classfileBuffer);
-			else
-				ret = new LazyByteArrayObjTags(transform(loader, className, classBeingRedefined, protectionDomain, classfileBuffer));
-
-			return ret;
-		}
-
-		public LazyByteArrayObjTags transform$$PHOSPHORTAGGED(ClassLoader loader, String className, Class<?> classBeingRedefined, ProtectionDomain protectionDomain, LazyByteArrayObjTags classtaint,
-				byte[] classfileBuffer, ControlTaintTagStack ctrl) throws IllegalClassFormatException {
-
-			if (!INITED) {
-				Configuration.IMPLICIT_TRACKING = true;
-				Configuration.MULTI_TAINTING = true;
-				Configuration.init();
-				INITED = true;
-			}
-			LazyByteArrayObjTags ret = null;
-
-			if (className != null && className.startsWith("sun")) //there are dynamically generated accessors for reflection, we don't want to instrument those.
-				ret = new LazyByteArrayObjTags(classfileBuffer);
-			else
-				ret = new LazyByteArrayObjTags(transform(loader, className, classBeingRedefined, protectionDomain, classfileBuffer));
-
-
-			return ret;
-		}
-
-		public LazyByteArrayIntTags transform$$PHOSPHORTAGGED(ClassLoader loader, String className, Class<?> classBeingRedefined, ProtectionDomain protectionDomain, LazyByteArrayIntTags classtaint,
-				byte[] classfileBuffer) throws IllegalClassFormatException {
-
-			if (!INITED) {
-				Configuration.IMPLICIT_TRACKING = false;
-				Configuration.MULTI_TAINTING = false;
-				Configuration.init();
-				INITED = true;
-			}
-			LazyByteArrayIntTags ret;
-			if (className != null && className.startsWith("sun")) //there are dynamically generated accessors for reflection, we don't want to instrument those.
-				ret = new LazyByteArrayIntTags(classfileBuffer);
-			else
-				ret = new LazyByteArrayIntTags(transform(loader, className, classBeingRedefined, protectionDomain, classfileBuffer));
-			return ret;
-		}
-
+		@Override
 		public byte[] transform(ClassLoader loader, final String className2, Class<?> classBeingRedefined, ProtectionDomain protectionDomain, byte[] classfileBuffer)
 				throws IllegalClassFormatException {
 			byte[] ret = _transform(loader, className2, classBeingRedefined, protectionDomain, classfileBuffer);
@@ -206,10 +148,44 @@ public class PreMain {
 			Configuration.taintTagFactory.instrumentationStarting(className);
 			try {
 				ClassNode cn = new ClassNode();
-				cr.accept(cn, ClassReader.SKIP_CODE);
+				cr.accept(cn, (Configuration.ALWAYS_CHECK_FOR_FRAMES ? 0 : ClassReader.SKIP_CODE));
 				boolean skipFrames = false;
+				boolean upgradeVersion = false;
+				if (className.equals("org/jruby/parser/Ruby20YyTables")) {
+					cn.version = 51;
+					upgradeVersion = true;
+				}
 				if (cn.version >= 100 || cn.version <= 50 || className.endsWith("$Access4JacksonSerializer") || className.endsWith("$Access4JacksonDeSerializer"))
 					skipFrames = true;
+				else if(Configuration.ALWAYS_CHECK_FOR_FRAMES)
+				{
+					for(MethodNode mn : cn.methods)
+					{
+						boolean hasJumps = false;
+						boolean foundFrame = false;
+						AbstractInsnNode ins = mn.instructions.getFirst();
+						if(mn.tryCatchBlocks.size() > 0)
+							hasJumps = true;
+						while(ins != null && !foundFrame)
+						{
+							if(ins instanceof JumpInsnNode || ins instanceof TableSwitchInsnNode || ins instanceof LookupSwitchInsnNode)
+								hasJumps = true;
+							if(ins instanceof FrameNode)
+							{
+								foundFrame = true;
+								break;
+							}
+							ins = ins.getNext();
+						}
+						if(foundFrame)
+							break;
+						if(hasJumps)
+						{
+							skipFrames = true;
+							break;
+						}
+					}
+				}
 				if (cn.visibleAnnotations != null)
 					for (Object o : cn.visibleAnnotations) {
 						AnnotationNode an = (AnnotationNode) o;
@@ -238,7 +214,10 @@ public class PreMain {
 							fis.close();
 							if (md5inst == null)
 								md5inst = MessageDigest.getInstance("MD5");
-							byte[] checksum = md5inst.digest(classfileBuffer);
+							byte[] checksum = null;
+							synchronized (md5inst) {
+								checksum = md5inst.digest(classfileBuffer);
+							}
 							boolean matches = true;
 							if (checksum.length > cachedDigest.length)
 								matches = false;
@@ -283,7 +262,7 @@ public class PreMain {
 					cr.accept(new ClassVisitor(Opcodes.ASM5, cw) {
 						@Override
 						public MethodVisitor visitMethod(int access, String name, String desc, String signature, String[] exceptions) {
-							return new JSRInlinerAdapter(super.visitMethod(access, name, desc, signature, exceptions), access, name, desc, signature, exceptions);
+							return new OurJSRInlinerAdapter(super.visitMethod(access, name, desc, signature, exceptions), access, name, desc, signature, exceptions);
 						}
 					}, 0);
 
@@ -301,13 +280,17 @@ public class PreMain {
 						Constructor<? extends ClassVisitor> extra = Configuration.extensionClassVisitor.getConstructor(ClassVisitor.class, Boolean.TYPE);
 						_cv = extra.newInstance(_cv, skipFrames);
 					}
-					if (TaintUtils.VERIFY_CLASS_GENERATION)
+					if (DEBUG || TaintUtils.VERIFY_CLASS_GENERATION)
 						_cv = new CheckClassAdapter(_cv, false);
+                    _cv = new ClinitRetransformClassVisitor(_cv);
 					if(isiFace)
 						_cv = new TaintTrackingClassVisitor(_cv, skipFrames, fields);
 					else
-						_cv = new SerialVersionUIDAdder(new TaintTrackingClassVisitor(_cv, skipFrames, fields));
-
+						_cv = new OurSerialVersionUIDAdder(new TaintTrackingClassVisitor(_cv, skipFrames, fields));
+					if(EclipseCompilerCV.isEclipseCompilerClass(className)) {
+						_cv = new EclipseCompilerCV(_cv);
+					}
+					_cv = new HidePhosphorFromASMCV(_cv, upgradeVersion);
 					if (Configuration.WITH_SELECTIVE_INST)
 						cr.accept(new PartialInstrumentationInferencerCV(), ClassReader.EXPAND_FRAMES);
 					cr.accept(
@@ -315,58 +298,62 @@ public class PreMain {
 							_cv
 							// )
 							, ClassReader.EXPAND_FRAMES);
+					byte[] instrumentedBytes = null;
+					try{
+						instrumentedBytes = cw.toByteArray();
+					} catch(MethodTooLargeException ex){
+						cw = new HackyClassWriter(cr, ClassWriter.COMPUTE_MAXS);
+						_cv = cw;
+						if (Configuration.extensionClassVisitor != null) {
+							Constructor<? extends ClassVisitor> extra = Configuration.extensionClassVisitor.getConstructor(ClassVisitor.class, Boolean.TYPE);
+							_cv = extra.newInstance(_cv, skipFrames);
+						}
+						if (DEBUG || TaintUtils.VERIFY_CLASS_GENERATION)
+							_cv = new CheckClassAdapter(_cv, false);
+						_cv = new ClinitRetransformClassVisitor(_cv);
+						if(isiFace)
+							_cv = new TaintTrackingClassVisitor(_cv, skipFrames, fields, true);
+						else
+							_cv = new OurSerialVersionUIDAdder(new TaintTrackingClassVisitor(_cv, skipFrames, fields, true));
+						_cv = new HidePhosphorFromASMCV(_cv, upgradeVersion);
+						if (Configuration.WITH_SELECTIVE_INST)
+							cr.accept(new PartialInstrumentationInferencerCV(), ClassReader.EXPAND_FRAMES);
+						cr.accept(
+								// new CheckClassAdapter(
+								_cv
+								// )
+								, ClassReader.EXPAND_FRAMES);
+						instrumentedBytes = cw.toByteArray();
+					}
 
 					if (DEBUG) {
 						File f = new File("debug/" + className + ".class");
 						f.getParentFile().mkdirs();
 						FileOutputStream fos = new FileOutputStream(f);
-						fos.write(cw.toByteArray());
+						fos.write(instrumentedBytes);
 						fos.close();
 					}
 					{
-						// if(TaintUtils.DEBUG_FRAMES)
-						// System.out.println("NOW IN CHECKCLASSADAPTOR");
-						if (DEBUG
-								|| (TaintUtils.VERIFY_CLASS_GENERATION && !className.startsWith("org/codehaus/janino/UnitCompiler") && !className.startsWith("jersey/repackaged/com/google/common/cache/LocalCache")
-										&& !className.startsWith("jersey/repackaged/com/google/common/collect/AbstractMapBasedMultimap") && !className.startsWith("jersey/repackaged/com/google/common/collect/"))) {
-							ClassReader cr2 = new ClassReader(cw.toByteArray());
-							cr2.accept(new CheckClassAdapter(new ClassWriter(0), true), 0);
+						if (DEBUG || TaintUtils.VERIFY_CLASS_GENERATION
+) {
+							ClassReader cr2 = new ClassReader(instrumentedBytes);
+							cr2.accept(new CheckClassAdapter(new ClassWriter(0), true), ClassReader.EXPAND_FRAMES);
 						}
 					}
-					// cv= new TraceClassVisitor(null,null);
-					// try{
-					// System.err.println("WARN LOGGING CLASS TO ASCII");
-					// cr = new ClassReader(cw.toByteArray());
-					// cr.accept(
-					// // new CheckClassAdapter(
-					// cv
-					// // )
-					// , 0);
-					// PrintWriter pw = null;
-					// try {
-					// pw = new PrintWriter(new FileWriter("lastClass.txt"));
-					// } catch (IOException e) {
-					// // TODO Auto-generated catch block
-					// e.printStackTrace();
-					// }
-					// cv.p.print(pw);
-					// pw.flush();
-					// }
-					// catch(Throwable t)
-					// {
-					// t.printStackTrace();
-					// }
-					// System.out.println("Succeeded w " + className);
+
 					if (Configuration.CACHE_DIR != null) {
 						String cacheKey = className.replace("/", ".");
 						File f = new File(Configuration.CACHE_DIR + File.separator + cacheKey + ".class");
 						FileOutputStream fos = new FileOutputStream(f);
-						byte[] ret = cw.toByteArray();
+						byte[] ret = instrumentedBytes;
 						fos.write(ret);
 						fos.close();
 						if (md5inst == null)
 							md5inst = MessageDigest.getInstance("MD5");
-						byte[] checksum = md5inst.digest(classfileBuffer);
+						byte[] checksum = null;
+						synchronized (md5inst) {
+							checksum = md5inst.digest(classfileBuffer);
+						}
 						f = new File(Configuration.CACHE_DIR + File.separator + cacheKey + ".md5sum");
 						fos = new FileOutputStream(f);
 
@@ -374,8 +361,9 @@ public class PreMain {
 						fos.close();
 						return ret;
 					}
-					return cw.toByteArray();
+					return instrumentedBytes;
 				} catch (Throwable ex) {
+					INSTRUMENTATION_EXCEPTION_OCURRED = true;
 					ex.printStackTrace();
 					cv = new TraceClassVisitor(null, null);
 					try {
@@ -385,6 +373,7 @@ public class PreMain {
 							_cv = extra.newInstance(_cv, skipFrames);
 						}
 						_cv = new SerialVersionUIDAdder(new TaintTrackingClassVisitor(_cv, skipFrames, fields));
+						_cv = new HidePhosphorFromASMCV(_cv, false);
 
 						cr.accept(_cv, ClassReader.EXPAND_FRAMES);
 					} catch (Throwable ex2) {
@@ -412,8 +401,6 @@ public class PreMain {
 					} catch (Exception ex2) {
 						ex.printStackTrace();
 					}
-					if(RUNTIME_INST)
-						System.exit(-1);
 					return new byte[0];
 
 				}
@@ -458,9 +445,8 @@ public class PreMain {
 	}
 
 	public static void premain(String args, Instrumentation inst) {
-		instrumentation = inst;
+		inst.addTransformer(new ClassSupertypeReadingTransformer());
 		RUNTIME_INST = true;
-		String taintCheckerClazz = null;
 		if (args != null) {
 			String[] aaa = args.split(",");
 			for (String s : aaa) {
@@ -471,8 +457,13 @@ public class PreMain {
 				else if (s.startsWith("cacheDir=")) {
 					Configuration.CACHE_DIR = s.substring(9);
 					File f = new File(Configuration.CACHE_DIR);
-					if (!f.exists())
-						f.mkdir();
+					if (!f.exists()) {
+						if(!f.mkdir()) {
+							// The cache directory did not exist and the attempt to create it failed
+							System.err.printf("Failed to create cache directory: %s. Generated files are not being cached.\n", Configuration.CACHE_DIR);
+							Configuration.CACHE_DIR = null;
+						}
+					}
 				}
 				else if(s.equals("objmethods"))
 					Configuration.WITH_HEAVY_OBJ_EQUALS_HASHCODE = true;
@@ -530,13 +521,15 @@ public class PreMain {
 		}
 		if (Instrumenter.loader == null)
 			Instrumenter.loader = bigLoader;
-		ClassFileTransformer transformer = new PCLoggingTransformer();
-		inst.addTransformer(transformer);
-	
-
+		// Ensure that BasicSourceSinkManager & anything needed to call isSourceOrSinkOrTaintThrough gets initialized
+		BasicSourceSinkManager.getInstance().isSourceOrSinkOrTaintThrough(Object.class);
+		inst.addTransformer(new PCLoggingTransformer());
+		inst.addTransformer(new SourceSinkTransformer(), true);
+		instrumentation = inst;
 	}
 
 	public static Instrumentation getInstrumentation() {
 		return instrumentation;
 	}
+
 }

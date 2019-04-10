@@ -19,6 +19,7 @@ import edu.columbia.cs.psl.phosphor.struct.LazyArrayIntTags;
 import edu.columbia.cs.psl.phosphor.struct.LazyArrayObjTags;
 
 public class Configuration {
+	public static boolean SKIP_LOCAL_VARIABLE_TABLE = false;
 	public static String ADDL_IGNORE = null;
 	public static boolean MULTI_TAINTING = true;
 	public static boolean IMPLICIT_TRACKING = true; //must be set to TRUE for MULTI_TAINTING to work!
@@ -51,7 +52,8 @@ public class Configuration {
 	public static boolean ANNOTATE_LOOPS = false;
 	
 	public static String STRING_SET_TAG_TAINT_CLASS = "edu/columbia/cs/psl/phosphor/runtime/TaintChecker";
-	
+	public static boolean ALWAYS_CHECK_FOR_FRAMES = false;
+
 	public static class Method {
 		final String name;
 		final String owner;

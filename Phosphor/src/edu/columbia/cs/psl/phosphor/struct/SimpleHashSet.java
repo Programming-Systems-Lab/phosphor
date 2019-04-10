@@ -6,16 +6,27 @@ package edu.columbia.cs.psl.phosphor.struct;
  */
 
 
+import edu.columbia.cs.psl.phosphor.Configuration;
+
 import java.io.Serializable;
+import java.util.Arrays;
 import java.util.Iterator;
 import java.util.NoSuchElementException;
 
 public class SimpleHashSet<T> implements Iterable<T>, Serializable {
 
 
+	public static int DEFAULT_HASHSET_SIZE = 16;
 	private static class Entry<T> implements Serializable {
 		T key;
 		Entry<T> next;
+		public Entry<T> copy(){
+			Entry<T> ret = new Entry<>();
+			ret.key = key;
+			if(next != null)
+				ret.next = next.copy();
+			return ret;
+		}
 	}
 	private Entry<T>[] buckets;
 
@@ -25,7 +36,7 @@ public class SimpleHashSet<T> implements Iterable<T>, Serializable {
 	}
 
 	public SimpleHashSet(){
-		this(16);
+		this(DEFAULT_HASHSET_SIZE);
 	}
 	/**
 	 *
@@ -35,6 +46,17 @@ public class SimpleHashSet<T> implements Iterable<T>, Serializable {
 
 		buckets = new Entry[capacity];
 		size = 0;
+	}
+
+	public SimpleHashSet<T> copy() {
+		SimpleHashSet<T> ret = new SimpleHashSet<>(buckets.length);
+		for(int i = 0; i < buckets.length; i++)
+		{
+			if(buckets[i] != null)
+				ret.buckets[i] = buckets[i].copy();
+		}
+		ret.size = size;
+		return ret;
 	}
 
 	public boolean isEmpty(){
@@ -52,6 +74,8 @@ public class SimpleHashSet<T> implements Iterable<T>, Serializable {
 		return index % buckets.length;
 	}
 
+
+
 	/**
 	 *
 	 * @param element
@@ -61,7 +85,14 @@ public class SimpleHashSet<T> implements Iterable<T>, Serializable {
 
 		if(element == null)
 			return false;
-		int index = hashFunction(element.hashCode());
+		int index;
+		if(Configuration.IMPLICIT_TRACKING && element instanceof String) {
+			synchronized (this) {
+				index = hashFunction(((String)element).hashCode());
+			}
+		}
+		else
+			index = hashFunction(element.hashCode());
 		Entry current = buckets[index];
 
 		while (current != null) {
@@ -81,6 +112,33 @@ public class SimpleHashSet<T> implements Iterable<T>, Serializable {
 		return ret;
 	}
 
+	@Override
+	public boolean equals(Object o) {
+		if (this == o) return true;
+		if (o == null || getClass() != o.getClass()) return false;
+
+		SimpleHashSet<T> that = (SimpleHashSet<T>) o;
+
+		if (size != that.size) return false;
+		for(T obj : this)
+		{
+			if(!that.contains(obj))
+				return false;
+		}
+		for (T obj : that) {
+			if (!this.contains(obj))
+				return false;
+		}
+		return true;
+	}
+
+	@Override
+	public int hashCode() {
+		int result = Arrays.hashCode(buckets);
+		result = 31 * result + size;
+		return result;
+	}
+
 	/**
 	 *
 	 * @param element
@@ -88,7 +146,14 @@ public class SimpleHashSet<T> implements Iterable<T>, Serializable {
 	 */
 	public boolean add(T element) {
 
-		int index = hashFunction(element.hashCode());
+		int index;
+		if(Configuration.IMPLICIT_TRACKING && element instanceof String) {
+			synchronized (this) {
+				index = hashFunction(((String)element).hashCode());
+			}
+		}
+		else
+			index = hashFunction(element.hashCode());
 		//log.info(element.toString() + " hashCode=" + element.hashCode() + " index=" + index);
 		Entry<T> current = buckets[index];
 
@@ -116,7 +181,14 @@ public class SimpleHashSet<T> implements Iterable<T>, Serializable {
 	 */
 	public boolean remove(T element) {
 
-		int index = hashFunction(element.hashCode());
+		int index;
+		if(Configuration.IMPLICIT_TRACKING && element instanceof String) {
+			synchronized (this) {
+				index = hashFunction(((String)element).hashCode());
+			}
+		}
+		else
+			index = hashFunction(element.hashCode());
 		Entry<T> current = buckets[index];
 		Entry<T> previous = null;
 

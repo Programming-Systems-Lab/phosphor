@@ -5,25 +5,19 @@ import edu.columbia.cs.psl.phosphor.TaintUtils;
 import edu.columbia.cs.psl.phosphor.instrumenter.analyzer.BasicArrayInterpreter;
 import edu.columbia.cs.psl.phosphor.instrumenter.analyzer.NeverNullArgAnalyzerAdapter;
 import edu.columbia.cs.psl.phosphor.struct.Field;
-import org.jgrapht.Graph;
-import org.jgrapht.alg.connectivity.BlockCutpointGraph;
-import org.jgrapht.alg.cycle.CycleDetector;
-import org.jgrapht.graph.DefaultDirectedGraph;
-import org.jgrapht.graph.DefaultEdge;
 import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.*;
-import org.objectweb.asm.tree.analysis.Analyzer;
-import org.objectweb.asm.tree.analysis.AnalyzerException;
-import org.objectweb.asm.tree.analysis.BasicValue;
-import org.objectweb.asm.tree.analysis.Frame;
+import org.objectweb.asm.tree.analysis.*;
 
 import java.util.*;
 import java.util.Map.Entry;
 
 public class PrimitiveArrayAnalyzer extends MethodVisitor {
+	public boolean isEmptyMethod = true;
+
 	final class PrimitiveArrayAnalyzerMN extends MethodNode {
 		private final String className;
 		private final boolean shouldTrackExceptions;
@@ -272,6 +266,16 @@ public class PrimitiveArrayAnalyzer extends MethodVisitor {
 					return -1;
 				}
 
+				protected Frame newFrame(int nLocals, int nStack) {
+					return new Frame(nLocals, nStack){
+						@Override
+						public void execute(AbstractInsnNode insn, Interpreter interpreter) throws AnalyzerException {
+							if(insn.getOpcode() > 200)
+								return;
+							super.execute(insn, interpreter);
+						}
+					};
+				}
 				@Override
 				public Frame[] analyze(String owner, MethodNode m) throws AnalyzerException {
 					Iterator<AbstractInsnNode> insns = m.instructions.iterator();
@@ -303,7 +307,7 @@ public class PrimitiveArrayAnalyzer extends MethodVisitor {
 
 								for(TryCatchBlockNode each : m.tryCatchBlocks){
 									try{
-										Class<?> caught = Class.forName(each.type.replace('/','.'),false,PrimitiveArrayAnalyzer.class.getClassLoader());
+										Class<?> caught = Class.forName((each.type == null ? "java.lang.Throwable" : each.type.replace('/','.')),false,PrimitiveArrayAnalyzer.class.getClassLoader());
 										if(caught == Throwable.class){
 											//if catching Throwable, we'll catch this regardless of whether we can load the exception type or not
 											newControlFlowEdge(idx,m.instructions.indexOf(each.handler));
@@ -546,7 +550,7 @@ public class PrimitiveArrayAnalyzer extends MethodVisitor {
 							BasicValue ex = (BasicValue) this.getFrames()[successor].getStack(0);
 							if(shouldTrackExceptions && ex!= null && ex.getType() != null && (ex.getType().getDescriptor().contains("Exception") || ex.getType().getDescriptor().contains("Error")))
 							{
-								succesorBlock.exceptionsThrown.add(ex.getType().getInternalName());
+								succesorBlock.exceptionsThrown.add(ex.getType().getInternalName() + "#" + successor);
 							}
 						}
 					}
@@ -736,39 +740,12 @@ public class PrimitiveArrayAnalyzer extends MethodVisitor {
 					}
 				}
 
-			} catch (AnalyzerException e) {
+			} catch (Throwable e) {
 				System.err.println("While analyzing " + className);
 				e.printStackTrace();
 			}
 			if (Configuration.ANNOTATE_LOOPS) {
-				Graph<BasicBlock, DefaultEdge> graph = new DefaultDirectedGraph<BasicBlock, DefaultEdge>(DefaultEdge.class);
-//				for(BasicBlock b : implicitAnalysisblocks.values())
-//					graph.addVertex(b);
-				for(BasicBlock b : implicitAnalysisblocks.values())
-				{
-					if(b.successors.size() > 0)
-						graph.addVertex(b);
-					for(BasicBlock c : b.successors) {
-						graph.addVertex(c);
-						graph.addEdge(b, c);
-					}
-				}
-				boolean hadChanges =true;
-				while(hadChanges) {
-					hadChanges = false;
-					CycleDetector<BasicBlock, DefaultEdge> detector = new CycleDetector<>(graph);
-					for (BasicBlock b : implicitAnalysisblocks.values()) {
-						if (!graph.containsVertex(b))
-							continue;
-						Set<BasicBlock> cycle = detector.findCyclesContainingVertex(b);
-						if (b.successors.size() > 1 && !cycle.containsAll(b.successors)) {
-							graph.removeVertex(b);
-							this.instructions.insertBefore(b.insn, new InsnNode(TaintUtils.LOOP_HEADER));
-							hadChanges = true;
-						}
-					}
-				}
-
+				GraphBasedAnalyzer.doGraphAnalysis(this, implicitAnalysisblocks);
 			}
 
 			if (Configuration.IMPLICIT_TRACKING || Configuration.IMPLICIT_LIGHT_TRACKING) {
@@ -1132,9 +1109,10 @@ public class PrimitiveArrayAnalyzer extends MethodVisitor {
 //								while (insn.getType() == AbstractInsnNode.FRAME || insn.getType() == AbstractInsnNode.LINE || insn.getType() == AbstractInsnNode.LABEL)
 //									insn = insn.getNext();
 								//Peek backwards to see if we are behind a GOTO
-								while(insn != null && insn.getPrevious() != null && (insn.getPrevious().getType() == AbstractInsnNode.LABEL || insn.getPrevious().getOpcode() == Opcodes.GOTO))
+								while(insn != null && insn.getPrevious() != null && mightEndBlock(insn.getPrevious())) {
 									insn = insn.getPrevious();
-								if(insn.getType() == AbstractInsnNode.LABEL)
+								}
+								if(insn.getType() == AbstractInsnNode.LABEL || insn.getType() == AbstractInsnNode.LINE || insn.getType() == AbstractInsnNode.FRAME)
 									insn = b.insn;
 //								System.out.println(b +"," + insn);
 
@@ -1205,11 +1183,15 @@ public class PrimitiveArrayAnalyzer extends MethodVisitor {
 								tmp.removeAll(b.exceptionsThrownTrueSide);
 								missedExceptions.addAll(tmp);
 							}
+							HashSet<String> filtered =new HashSet<>();
 //							System.out.println(name + ":"+r.idx+" " + missedExceptions);
 							for(String s : missedExceptions){
 								if(s == null)
 									s = "java/lang/Throwable";
-								instructions.insertBefore(r.insn, new TypeInsnNode(TaintUtils.UNTHROWN_EXCEPTION, s));
+								if(s.contains("#"))
+									s = s.substring(0,s.indexOf('#'));
+								if(filtered.add(s))
+									instructions.insertBefore(r.insn, new TypeInsnNode(TaintUtils.UNTHROWN_EXCEPTION, s));
 							}
 						}
 						else if(shouldTrackExceptions && (r.insn.getType() == AbstractInsnNode.METHOD_INSN || r.insn
@@ -1262,7 +1244,11 @@ public class PrimitiveArrayAnalyzer extends MethodVisitor {
 								AbstractInsnNode i = insn;
 								while (i != null && i.getType() != AbstractInsnNode.LABEL)
 									i = i.getPrevious();
-								AbstractInsnNode oldLabel = i;
+
+								LinkedList<LabelNode> oldLabels = new LinkedList<>();
+								oldLabels.add(((LabelNode)i));
+								if(i.getPrevious() != null && i.getPrevious().getType() == AbstractInsnNode.LABEL)
+									oldLabels.add(((LabelNode) i.getPrevious()));
 
 								LabelNode newLabel = new LabelNode(new Label());
 								instructions.insertBefore(insn, newLabel);
@@ -1271,9 +1257,8 @@ public class PrimitiveArrayAnalyzer extends MethodVisitor {
 									if (i instanceof FrameNode) {
 										FrameNode fr = (FrameNode) i;
 										for (int j = 0; j < fr.stack.size(); j++) {
-											if (fr.stack.get(j) == oldLabel) {
-
-												fr.stack.set(j, newLabel);
+											if(oldLabels.contains(fr.stack.get(j))){
+												fr.stack.set(j, newLabel.getLabel());
 											}
 										}
 									}
@@ -1317,6 +1302,23 @@ public class PrimitiveArrayAnalyzer extends MethodVisitor {
 		HashMap<Integer,BasicBlock> implicitAnalysisblocks = new HashMap<Integer,PrimitiveArrayAnalyzer.BasicBlock>();
 
 	}
+
+	private boolean mightEndBlock(AbstractInsnNode insn) {
+		if(insn.getType() == AbstractInsnNode.LABEL)
+			return true;
+		switch(insn.getOpcode()){
+			case Opcodes.GOTO:
+			case Opcodes.RETURN:
+			case Opcodes.IRETURN:
+			case Opcodes.LRETURN:
+			case Opcodes.DRETURN:
+			case Opcodes.ARETURN:
+			case Opcodes.ATHROW:
+				return true;
+		}
+		return false;
+	}
+
 	static void debug(AbstractInsnNode insn){
 		while(insn != null) {
 			if (insn.getType() == AbstractInsnNode.LABEL)
@@ -1539,6 +1541,7 @@ public class PrimitiveArrayAnalyzer extends MethodVisitor {
 		super.visitMethodInsn(opcode, owner, name, desc,itfc);
 		Type returnType = Type.getReturnType(desc);
 		Type newReturnType = TaintUtils.getContainerReturnType(returnType);
+		isEmptyMethod = false;
 		if(newReturnType != returnType && !(returnType.getSort() == Type.ARRAY))
 			wrapperTypesToPreAlloc.add(newReturnType);
 	}

@@ -1,56 +1,26 @@
 package edu.columbia.cs.psl.phosphor;
 
-import java.io.ByteArrayOutputStream;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileNotFoundException;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.lang.instrument.ClassFileTransformer;
-import java.net.MalformedURLException;
-import java.net.URL;
-import java.net.URLClassLoader;
-import java.nio.channels.FileChannel;
-import java.nio.file.FileSystems;
-import java.nio.file.FileVisitResult;
-import java.nio.file.FileVisitor;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.attribute.BasicFileAttributes;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Enumeration;
-import java.util.HashMap;
-import java.util.LinkedList;
-import java.util.Random;
-import java.util.Scanner;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipException;
-import java.util.zip.ZipFile;
-import java.util.zip.ZipOutputStream;
-
+import edu.columbia.cs.psl.phosphor.instrumenter.TaintTrackingClassVisitor;
 import edu.columbia.cs.psl.phosphor.runtime.StringUtils;
-import org.apache.commons.cli.BasicParser;
-import org.apache.commons.cli.CommandLine;
-import org.apache.commons.cli.CommandLineParser;
-import org.apache.commons.cli.HelpFormatter;
-import org.apache.commons.cli.Option;
-import org.apache.commons.cli.Options;
+import edu.columbia.cs.psl.phosphor.runtime.Tainter;
+import org.apache.commons.cli.*;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.ClassNode;
 
-import edu.columbia.cs.psl.phosphor.instrumenter.TaintTrackingClassVisitor;
-import edu.columbia.cs.psl.phosphor.runtime.Tainter;
+import java.io.*;
+import java.lang.instrument.ClassFileTransformer;
+import java.net.MalformedURLException;
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.nio.channels.FileChannel;
+import java.nio.file.*;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.zip.*;
 
 public class Instrumenter {
 	public static ClassLoader loader;
@@ -170,7 +140,7 @@ public class Instrumenter {
 					ClassNode cn = new ClassNode();
 					cn.name = name;
 					cn.superName = superName;
-					cn.interfaces = new ArrayList<String>();
+					cn.interfaces = new ArrayList<>(Arrays.asList(interfaces));
 					Instrumenter.classes.put(name, cn);
 				}
 			}, ClassReader.SKIP_CODE);
@@ -217,21 +187,6 @@ public class Instrumenter {
 		}
 	}
 
-	static Option opt_taintSources = Option.builder("taintSources")
-		.argName("taintSources")
-		.hasArg()
-		.desc("File with listing of taint sources to auto-taint")
-		.build();
-	static Option opt_taintThrough= Option.builder("taintThrough")
-			.argName("taintThrough")
-			.hasArg()
-			.desc("File with listing of methods that should directly propogate the taint from 'this' to their return value")
-			.build();
-	static Option opt_taintSinks = Option.builder("taintSinks")
-		.argName("taintSinks")
-		.hasArg()
-		.desc("File with listing of taint sinks to use to check for auto-taints")
-		.build();
 	static Option opt_dataTrack = Option.builder("withoutDataTrack")
 		.desc("Disable taint tracking through data flow (on by default)")
 		.build();
@@ -285,9 +240,15 @@ public class Instrumenter {
 	static Option opt_serialization = Option.builder("serialization")
 			.desc("Read and write taint tags through Java Serialization")
 			.build();
+	static Option opt_disableLocalsInfo = Option.builder("skipLocals")
+			.desc("Do not output local variable debug tables for generated local variables (useful for avoiding warnings from D8)")
+			.build();
+	static Option opt_alwaysCheckForFrames = Option.builder("alwaysCheckForFrames")
+			.desc("Always check to ensure that class files with version > Java 8 ACTUALLY have frames - useful for instrumenting android-targeting code that is compiled with Java 8 but without frames").build();
 	static Option help = Option.builder("help")
 		.desc("print this message")
 		.build();
+
 
 	public static InputStream sourcesFile;
 	public static InputStream sinksFile;
@@ -305,9 +266,6 @@ public class Instrumenter {
 		options.addOption(opt_controlLightTrack);
 		options.addOption(opt_controlTrackExceptions);
 		options.addOption(opt_dataTrack);
-		options.addOption(opt_taintSinks);
-		options.addOption(opt_taintSources);
-		options.addOption(opt_taintThrough);
 		options.addOption(opt_trackArrayLengthTaints);
 		options.addOption(opt_trackArrayIndexTaints);
 		options.addOption(opt_withoutFieldHiding);
@@ -320,6 +278,8 @@ public class Instrumenter {
 		options.addOption(opt_readAndSaveBCI);
 		options.addOption(opt_serialization);
 		options.addOption(opt_withoutBranchNotTaken);
+		options.addOption(opt_disableLocalsInfo);
+		options.addOption(opt_alwaysCheckForFrames);
 
 		CommandLineParser parser = new BasicParser();
 	    CommandLine line = null;
@@ -339,16 +299,6 @@ public class Instrumenter {
 			return;
 		}
 		
-		try {
-			if (line.getOptionValue("taintSources") != null)
-				sourcesFile = new FileInputStream(line.getOptionValue("taintSources"));
-			if (line.getOptionValue("taintThrough") != null)
-				taintThroughFile = new FileInputStream(line.getOptionValue("taintThrough"));
-			if (line.getOptionValue("taintSinks") != null)
-				sinksFile = new FileInputStream(line.getOptionValue("taintSinks"));
-		} catch (FileNotFoundException ex) {
-			ex.printStackTrace();
-		}
 		Configuration.MULTI_TAINTING = line.hasOption("multiTaint");
 		Configuration.IMPLICIT_TRACKING = line.hasOption("controlTrack");
 		Configuration.IMPLICIT_LIGHT_TRACKING = line.hasOption("lightControlTrack");
@@ -370,6 +320,8 @@ public class Instrumenter {
 		
 		Configuration.ARRAY_INDEX_TRACKING = line.hasOption("withArrayIndexTags");
 		Configuration.WITHOUT_BRANCH_NOT_TAKEN = line.hasOption("withoutBranchNotTaken");
+		Configuration.SKIP_LOCAL_VARIABLE_TABLE = line.hasOption("skipLocals");
+		Configuration.ALWAYS_CHECK_FOR_FRAMES = line.hasOption("alwaysCheckForFrames");
 		Configuration.init();
 
 		
@@ -678,6 +630,13 @@ public class Instrumenter {
 		return ret;
 	}
 
+	public static boolean isIgnoredFromControlTrack(String className, String name) {
+		if((className.equals("java/nio/charset/Charset")  || className.equals("java/lang/StringCoding") || className.equals("java/nio/charset/CharsetEncoder")|| className.equals("java/nio/charset/CharsetDecoder")) && !name.equals("<clinit>") && !name.equals("<init>")) {
+			return true;
+		}
+		return false;
+	}
+
 	private static class Result {
 		ZipEntry e;
 		byte[] buf;
@@ -687,11 +646,16 @@ public class Instrumenter {
 	 * Handle Jar file, Zip file and War file
 	 */
 	public static LinkedList<Future> processZip(final File f, File outputDir, ExecutorService executor) {
+		return _processZip(f, outputDir, executor, false);
+	}
+	private static LinkedList<Future> _processZip(final File f, File outputDir, ExecutorService executor, boolean unCompressed) {
 		try {
 			LinkedList<Future<Result>> ret = new LinkedList<>();
 			final ZipFile zip = new ZipFile(f);
 			ZipOutputStream zos = null;
 			zos = new ZipOutputStream(new FileOutputStream(outputDir.getPath() + File.separator + f.getName()));
+			if(unCompressed)
+				zos.setLevel(ZipOutputStream.STORED);
 			Enumeration<? extends ZipEntry> entries = zip.entries();
 			while (entries.hasMoreElements()) {
 				final ZipEntry e = entries.nextElement();
@@ -714,7 +678,6 @@ public class Instrumenter {
 					}
 				} else if (e.getName().endsWith(".jar")) {
 					ZipEntry outEntry = new ZipEntry(e.getName());
-
 					Random r = new Random();
 					String markFileName = Long.toOctalString(System.currentTimeMillis())
 						+ Integer.toOctalString(r.nextInt(10000))
@@ -735,9 +698,16 @@ public class Instrumenter {
 					File tmp2 = new File("/tmp/tmp2");
 					if(!tmp2.exists())
 						tmp2.mkdir();
-					processZip(tmp, tmp2, executor);
+					_processZip(tmp, tmp2, executor, true);
 					tmp.delete();
 
+					outEntry.setMethod(ZipEntry.STORED);
+					Path newFile = Paths.get("/tmp/tmp2/" + markFileName);
+
+					outEntry.setSize(Files.size(newFile));
+					CRC32 crc= new CRC32();
+					crc.update(Files.readAllBytes(newFile));
+					outEntry.setCrc(crc.getValue());
 					zos.putNextEntry(outEntry);
 					is = new FileInputStream("/tmp/tmp2/" + markFileName);
 					byte[] buffer = new byte[1024];
@@ -813,7 +783,7 @@ public class Instrumenter {
 					try {
 						r = fr.get();
 						break;
-					} catch (InterruptedException _) {
+					} catch (InterruptedException e) {
 						continue;
 					}
 				}
@@ -915,4 +885,42 @@ public class Instrumenter {
 		return owner.equals("sun/java2d/cmm/lcms/LCMSImageLayout") && name.equals("dataArray");
 	}
 
+	/* Returns the class node associated with the specified class name or null if none exists and a new one could not
+	 * successfully be created for the class name. */
+	public static ClassNode getClassNode(String className) {
+		ClassNode cn = classes.get(className);
+		if(cn == null) {
+			// Class was loaded before ClassSupertypeReadingTransformer was added
+			return tryToAddClassNode(className);
+		} else {
+			return cn;
+		}
+	}
+
+	/* Attempts to create a ClassNode populated with supertype information for this class. */
+	private static ClassNode tryToAddClassNode(String className) {
+		try {
+			String resource = className + ".class";
+			InputStream is = ClassLoader.getSystemResourceAsStream(resource);
+			if (is == null) {
+				return null;
+			}
+			ClassReader cr = new ClassReader(is);
+			cr.accept(new ClassVisitor(Opcodes.ASM5) {
+				@Override
+				public void visit(int version, int access, String name, String signature, String superName, String[] interfaces) {
+					super.visit(version, access, name, signature, superName, interfaces);
+					ClassNode cn = new ClassNode();
+					cn.name = name;
+					cn.superName = superName;
+					cn.interfaces = new ArrayList<>(Arrays.asList(interfaces));
+					classes.put(name, cn);
+				}
+			}, ClassReader.SKIP_CODE);
+			is.close();
+			return classes.get(className);
+		} catch (Exception e) {
+			return null;
+		}
+	}
 }

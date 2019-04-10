@@ -1196,4 +1196,30 @@ public class RuntimeBoxUnboxPropogator {
 	public static Short valueOfS$$PHOSPHORTAGGED(String s, int t, int radix) {
 		return BoxedPrimitiveStoreWithIntTags.valueOf(getTaint(s), Short.parseShort(s, radix));
 	}
+
+	public static TaintedIntWithObjTag digit$$PHOSPHORTAGGED(Taint cTaint, char c, Taint rTaint, int radix, TaintedIntWithObjTag ret) {
+		ret.val = Character.digit(c, radix);
+		if (cTaint != null)
+			ret.taint = cTaint;
+		return ret;
+	}
+
+	public static TaintedIntWithObjTag digit$$PHOSPHORTAGGED(Taint cTaint, int codePoint, Taint rTaint, int radix, TaintedIntWithObjTag ret) {
+		ret.val = Character.digit(codePoint, radix);
+		if (cTaint != null)
+			ret.taint = cTaint;
+		return ret;
+	}
+
+	public static TaintedIntWithIntTag digit$$PHOSPHORTAGGED(int cTaint, char c, int rTaint, int radix, TaintedIntWithIntTag ret) {
+		ret.val = Character.digit(c, radix);
+		ret.taint = cTaint;
+		return ret;
+	}
+
+	public static TaintedIntWithIntTag digit$$PHOSPHORTAGGED(int cTaint, int codePoint, int rTaint, int radix, TaintedIntWithIntTag ret) {
+		ret.val = Character.digit(codePoint, radix);
+		ret.taint = cTaint;
+		return ret;
+	}
 }
